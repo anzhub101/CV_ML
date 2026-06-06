@@ -19,6 +19,9 @@ data/dataset/labels/**/*
 *.pt
 weights/*.pt
 
+# Classical baseline model
+*.joblib
+
 # YOLO training runs
 training/runs/
 
@@ -26,6 +29,7 @@ training/runs/
 outputs/*.csv
 outputs/*.png
 outputs/*.txt
+outputs/*.log
 
 # OS / IDE
 .DS_Store
@@ -35,3 +39,6 @@ outputs/*.txt
 
 # Keep folder structure with .gitkeep
 !**/.gitkeep
+
+# Source dataset (large; not committed)
+TrainData/

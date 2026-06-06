@@ -44,40 +44,34 @@ RAW IMAGE
 ## Directory Structure
 
 ```
-TrainData/                          # SOURCE data, ships next to the project
+Project_CEN454/                     # repo root (single git repo)
+│
+├── TrainData/                      # SOURCE data (not committed)
 │   ├── GUN/ knife/ shuriken/       # source X-ray images
 │   ├── safe/                       # safe bags (no threat)
 │   └── annotations/
 │       └── GUN/ knife/ shuriken/   # instance-indexed mask PNGs
-
-CEN454_Project/                     # (= cen454-baggage-detection/)
 │
 ├── data/                           # AUTO-staged + generated (gitignored)
-│   ├── raw/                        # staged from ../TrainData by setup_data.py
+│   ├── raw/                        # staged from TrainData/ by setup_data.py
 │   │   ├── GUN/                    # source images (~800)
 │   │   ├── knife/                  # source images (~900)
 │   │   ├── shuriken/               # source images (~90)
 │   │   └── safe/                   # source images (~110)
 │   │
-│   ├── annotations/                # staged from ../TrainData/annotations
+│   ├── annotations/                # staged from TrainData/annotations
 │   │   ├── GUN/                    # instance-indexed PNG masks (NOT 0/255)
 │   │   ├── knife/                  # instance-indexed PNG masks
 │   │   └── shuriken/               # instance-indexed PNG masks
 │   │
 │   ├── all_labels/                 # generated YOLO .txt labels
 │   └── dataset/                    # YOLO-formatted, auto-generated
-│       ├── images/
-│       │   ├── train/
-│       │   ├── val/
-│       │   └── test/
-│       └── labels/
-│           ├── train/
-│           ├── val/
-│           └── test/
+│       ├── images/{train,val,test}/
+│       └── labels/{train,val,test}/
 │
 ├── preprocessing/
 │   ├── config.py                   # class map, data paths, thresholds
-│   ├── setup_data.py               # stage ../TrainData → data/raw + annotations
+│   ├── setup_data.py               # stage TrainData/ → data/raw + annotations
 │   ├── convert_annotations.py     # instance-mask PNG → YOLO .txt
 │   ├── build_dataset.py            # train/val/test split assembly
 │   ├── preprocess.py               # Classical CV pipeline
@@ -88,13 +82,28 @@ CEN454_Project/                     # (= cen454-baggage-detection/)
 │
 ├── training/
 │   ├── data.yaml                   # YOLO dataset config
+│   ├── download_weights.py         # pre-fetch pretrained weights
 │   ├── train.py                    # Fine-tuning script
+│   ├── validate.py                 # YOLO test-split metrics
 │   └── runs/                       # YOLO training outputs (auto)
 │
-├── inference/
-│   ├── predict.py                  # Single image inference
-│   ├── evaluate.py                 # Batch evaluation + CSV
-│   └── postprocess.py              # Label resolution, edge cases
+├── inference/                      # helper modules for run_inference.py
+│   ├── postprocess.py              # label resolution, edge cases
+│   ├── quality_handler.py          # adaptive quality fixing
+│   ├── localization.py             # morphological bbox refinement
+│   ├── submission.py               # submission CSV writer/validator
+│   └── visualize_results.py        # annotated prediction images
+│
+├── utils/
+│   ├── metrics.py                  # accuracy, macro F1, IoU, final score
+│   └── logger.py
+│
+├── baseline/
+│   └── hog_svm.py                  # classical HOG + SVM classifier baseline
+│
+├── run_inference.py                # MASTER inference + evaluation entrypoint
+├── run_all.sh                      # end-to-end pipeline runner
+├── requirements.txt
 │
 ├── weights/
 │   └── best.pt                     # Best fine-tuned model
@@ -153,8 +162,8 @@ MIN_CONTOUR_AREA    = 50   # drop speckle noise below this many mask pixels
 
 ### 1.1b Data Staging — TrainData → data/
 
-The original dataset ships in a sibling **`TrainData/`** folder (next to the
-project), laid out as `TrainData/{GUN,knife,shuriken,safe}` for images and
+The original dataset ships in the **`TrainData/`** folder at the project root,
+laid out as `TrainData/{GUN,knife,shuriken,safe}` for images and
 `TrainData/annotations/{GUN,knife,shuriken}` for masks. `setup_data.py` mirrors
 that into the `data/raw` and `data/annotations` layout the rest of the pipeline
 expects — symlinks by default (instant, no duplicated disk), or `--copy`.
@@ -1326,7 +1335,7 @@ INCOMING TEST IMAGE
 
 ```
 Step 0:   python preprocessing/setup_data.py
-           → Stages ../TrainData into data/raw + data/annotations
+           → Stages TrainData/ into data/raw + data/annotations
              (symlink by default; --copy to copy)
 
 Step 1:   python preprocessing/convert_annotations.py

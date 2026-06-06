@@ -1,0 +1,13 @@
+## CEN454 baggage threat detection - YOLO dataset config
+## "safe" is NOT a class; safe images have empty label files (background).
+
+path: data/dataset      # dataset root, relative to project root
+train: images/train
+val: images/val
+test: images/test
+
+nc: 3
+names:
+  0: gun
+  1: knife
+  2: shuriken

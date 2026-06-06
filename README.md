@@ -39,14 +39,17 @@ Output: {safe | gun | knife | shuriken}  + bbox
 ## Project Structure
 
 ```
-cen454-baggage-detection/
+Project_CEN454/
+├── TrainData/                  # source dataset (images + masks; not committed)
 ├── preprocessing/
-│   ├── config.py               # class map, thresholds, shared constants
-│   ├── convert_annotations.py  # PNG masks -> YOLO .txt labels
+│   ├── config.py               # class map, paths, thresholds, constants
+│   ├── setup_data.py           # stage TrainData/ -> data/raw + annotations
+│   ├── convert_annotations.py  # instance-mask PNGs -> YOLO .txt labels
 │   ├── build_dataset.py        # train/val/test split assembly
 │   ├── augment.py              # albumentations augmentation (train only)
 │   ├── preprocess.py           # classical CV pipeline (Topics 3-6)
 │   ├── verify_dataset.py       # pre-training format checks
+│   ├── visualize_masks.py      # render the near-black masks + derived boxes
 │   └── visualize_labels.py     # draw boxes to sanity-check labels
 ├── training/
 │   ├── data.yaml               # YOLO dataset config
@@ -55,11 +58,19 @@ cen454-baggage-detection/
 │   └── validate.py             # test-split evaluation
 ├── inference/
 │   ├── postprocess.py          # filters, priority resolution, IoU
-│   ├── predict.py              # single-image pipeline (+ TTA)
-│   └── evaluate.py             # batch inference + submission CSV
-├── data/
-│   ├── raw/{GUN,knife,shuriken,safe}/      # original images (not committed)
-│   ├── annotations/{GUN,knife,shuriken}/   # binary PNG masks
+│   ├── quality_handler.py      # adaptive quality fixing
+│   ├── localization.py         # morphological bbox refinement
+│   ├── submission.py           # submission CSV writer/validator
+│   └── visualize_results.py    # annotated prediction images
+├── utils/
+│   ├── metrics.py              # accuracy, macro F1, IoU, final score
+│   └── logger.py
+├── baseline/
+│   └── hog_svm.py              # classical HOG + SVM classifier baseline
+├── run_inference.py            # MASTER inference + evaluation entrypoint
+├── data/                       # all auto-staged/generated (not committed)
+│   ├── raw/{GUN,knife,shuriken,safe}/      # staged from TrainData/
+│   ├── annotations/{GUN,knife,shuriken}/   # instance-indexed mask PNGs
 │   ├── all_labels/                         # generated YOLO labels
 │   └── dataset/                            # final YOLO structure
 │       ├── images/{train,val,test}/
@@ -89,58 +100,144 @@ python training/download_weights.py
 
 ---
 
-## Data Placement
+## Data
 
-Put your raw files here before running anything:
+The dataset ships in a **`TrainData/` folder at the project root**:
 
 ```
-data/raw/GUN/         # gun X-ray images
-data/raw/knife/       # knife X-ray images
-data/raw/shuriken/    # shuriken X-ray images
-data/raw/safe/        # safe bag images
-
-data/annotations/GUN/         # binary mask PNGs (same filename stem as image)
-data/annotations/knife/
-data/annotations/shuriken/
+TrainData/
+├── GUN/  knife/  shuriken/      # source X-ray images
+├── safe/                        # safe bags (no threat)
+└── annotations/
+    ├── GUN/  knife/  shuriken/  # one mask PNG per image (same filename stem)
 ```
 
-Image and mask filenames must share the same stem, e.g.
-`data/raw/GUN/P00096.png` ↔ `data/annotations/GUN/P00096.png`.
+You do **not** copy these in by hand — `setup_data.py` stages them into
+`data/raw/` and `data/annotations/` (symlinks by default; `--copy` to copy).
+If your `TrainData` lives elsewhere, point to it:
+
+```bash
+export CEN454_SOURCE_DATA=/path/to/TrainData      # optional
+python preprocessing/setup_data.py                # or: --copy / --source PATH
+```
+
+### About the annotation masks (important)
+
+The mask PNGs are **instance-indexed**, not 0/255 binary. Background is 0 and
+each separate object instance gets a tiny integer id (1, 2, 3, …). Because
+those ids are small next to 255, the masks look almost solid **black** in an
+image viewer — but they are not empty. The converter treats any pixel `> 0` as
+a threat and turns each instance id into its own YOLO box; the **class comes
+from the folder** the mask lives in. (Multiplying by 255 only makes them
+*visible* — run `visualize_masks.py` to see them properly colored.)
+
+Two cases are skipped automatically, to keep labels clean:
+
+- **Ambiguous multi-threat scans** — the same bag filed under two class folders
+  (e.g. `gun` *and* `knife`) with one shared mask that doesn't say which object
+  is which class.
+- **Empty masks** — a threat-folder image whose mask has no annotated region.
 
 ---
 
 ## Usage
 
-### Full pipeline (one command)
+Everything runs from the project root (`Project_CEN454/`).
+
+### Option A — the whole thing in one command
 
 ```bash
 bash run_all.sh
 ```
 
-### Or step by step
+This runs every step below in order: stage data → build labels → split →
+augment → preprocess → **train YOLO26** → **evaluate the test split with the
+full project criteria**.
+
+### Option B — step by step
+
+**1. Prepare the dataset** (turns `TrainData/` into a YOLO dataset):
 
 ```bash
-python preprocessing/convert_annotations.py   # masks -> labels
+python preprocessing/setup_data.py            # stage TrainData -> data/
+python preprocessing/convert_annotations.py   # instance masks -> YOLO labels
+python preprocessing/visualize_masks.py       # (optional) eyeball the masks
 python preprocessing/build_dataset.py         # split into train/val/test
-python preprocessing/augment.py               # expand training set
+python preprocessing/augment.py               # expand the training split
 python preprocessing/preprocess.py            # classical CV on all images
-python preprocessing/verify_dataset.py        # confirm format is valid
-python training/train.py                       # fine-tune YOLO26
-python training/validate.py                    # evaluate on test split
+python preprocessing/verify_dataset.py        # confirm the format is valid
 ```
 
-### Generate predictions on a hidden test set (evaluation day)
+**2. Train the YOLO26 model**
 
 ```bash
-python inference/evaluate.py --images hidden_test
-# -> writes outputs/predictions.csv
+python training/download_weights.py   # once, while online: fetch yolo26s.pt
+python training/train.py              # fine-tune; saves weights/best.pt
 ```
 
-### Predict on a single image
+Training uses a high epoch ceiling (150) with early stopping (`patience=25`),
+so it stops itself at the best validation mAP — see *How Training Stops* below.
+Tune `EPOCHS`, `BATCH`, `FREEZE`, etc. at the top of `training/train.py`.
+Optionally inspect raw detector metrics on the test split:
 
 ```bash
-python inference/predict.py path/to/image.png --tta
+python training/validate.py           # YOLO mAP50, mAP50-95, precision/recall
 ```
+
+**3. Run the full framework and compute the testing criteria**
+
+This is the end-to-end inference pipeline (quality-fix → classical CV →
+YOLO26 → post-processing → localization refinement → TTA). Point it at the
+test images **and** their YOLO ground-truth labels to score the exact project
+criteria:
+
+```bash
+python run_inference.py \
+    --images data/dataset/images/test \
+    --labels data/dataset/labels/test
+```
+
+It prints and saves (`outputs/evaluation_report.txt`):
+
+```
+Accuracy, Macro F1   -> Classification Score = 0.7*Acc + 0.3*F1   (70%)
+Mean IoU (>=0.5)     -> Localization Score   = mean IoU            (30%)
+                        FINAL SCORE          = 0.7*Cls + 0.3*Loc
+```
+
+### Evaluation day — predict on the hidden test set (no labels)
+
+```bash
+python run_inference.py --images hidden_test
+# -> writes outputs/predictions.csv  (Image Name, Predicted Label)
+# add --no-tta for speed, --no-viz to skip annotated images
+```
+
+---
+
+## Classical baseline (HOG + SVM)
+
+A small, fully classical alternative to the YOLO detector, included to
+demonstrate the course's classical computer-vision + machine-learning
+techniques: **Histogram of Oriented Gradients (HOG)** edge/gradient descriptors
++ **CLAHE** contrast normalization + a **Support Vector Machine** classifier.
+It does the **classification** task only (HOG+SVM does not localize), reuses the
+same dataset split, and is scored with the same metrics — so its numbers are
+directly comparable to the detector's classification score. No deep-learning
+framework needed (just OpenCV + scikit-learn).
+
+Run after the data-prep steps have produced `data/dataset/`:
+
+```bash
+python baseline/hog_svm.py train     # fit on the train split -> baseline/hog_svm.joblib
+python baseline/hog_svm.py eval      # score on the test split (acc, macro F1)
+python baseline/hog_svm.py predict --images hidden_test   # -> CSV submission
+```
+
+Reference result on this dataset's test split (yours will vary with the data):
+`Accuracy ≈ 0.80, Macro F1 ≈ 0.83, Classification Score ≈ 0.81`. Use it as a
+sanity floor — the fine-tuned YOLO26 pipeline should beat it, and it also gives
+you a classical fallback that needs no GPU.
 
 ---
 
@@ -171,4 +268,8 @@ backbone and train only the detection head.
   `Localization = mean IoU (≥0.5 counts)`,
   `Final = 0.7*Classification + 0.3*Localization`.
 
----q
+---
+
+## License
+
+Coursework project for CEN454 Computer Vision and Machine Learning.
