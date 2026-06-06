@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Data (don't commit the dataset or images)
+data/raw/**/*.png
+data/raw/**/*.jpg
+data/raw/**/*.jpeg
+data/annotations/**/*.png
+data/all_labels/*.txt
+data/dataset/images/**/*
+data/dataset/labels/**/*
+
+# Model weights (large binaries)
+*.pt
+weights/*.pt
+
+# YOLO training runs
+training/runs/
+
+# Outputs
+outputs/*.csv
+outputs/*.png
+outputs/*.txt
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Keep folder structure with .gitkeep
+!**/.gitkeep
