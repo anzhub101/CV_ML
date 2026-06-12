@@ -48,17 +48,14 @@ def validate_size(bbox_xyxy, image_shape):
     return (box_area / img_area) >= MIN_BBOX_AREA_RATIO
 
 
-def resolve_detections(detections, image):
+def filter_detections(detections, image):
     """
-    Apply all filters and collapse to a single (label, bbox).
+    Apply the three robustness filters and return ALL detections that survive.
 
     detections: list of dicts with keys
         class_id, class_name, confidence, bbox_xyxy
-    Returns: (label_str, bbox_xyxy or None)
+    Returns: list of the kept detection dicts (may be empty = safe).
     """
-    if not detections:
-        return 'safe', None
-
     valid = []
     for det in detections:
         conf = det['confidence']
@@ -72,7 +69,28 @@ def resolve_detections(detections, image):
         if conf < CONF_HIGH and not validate_metal_density(image, bbox):
             continue
         valid.append(det)
+    return valid
 
+
+def count_by_class(detections):
+    """Return {class_name: count} for a list of (kept) detections."""
+    counts = {}
+    for det in detections:
+        counts[det['class_name']] = counts.get(det['class_name'], 0) + 1
+    return counts
+
+
+def resolve_detections(detections, image):
+    """
+    Apply all filters and collapse to a single (label, bbox) for the
+    image-level classification submission (highest-priority threat).
+
+    Returns: (label_str, bbox_xyxy or None)
+    """
+    if not detections:
+        return 'safe', None
+
+    valid = filter_detections(detections, image)
     if not valid:
         return 'safe', None
 

@@ -66,7 +66,7 @@ Project_CEN454/
 │   ├── metrics.py              # accuracy, macro F1, IoU, final score
 │   └── logger.py
 ├── baseline/
-│   └── hog_svm.py              # classical HOG + SVM classifier baseline
+│   └── hog_svm.py              # classical HOG+LBP+SVM classifier (+ tuning)
 ├── run_inference.py            # MASTER inference + evaluation entrypoint
 ├── data/                       # all auto-staged/generated (not committed)
 │   ├── raw/{GUN,knife,shuriken,safe}/      # staged from TrainData/
@@ -215,29 +215,46 @@ python run_inference.py --images hidden_test
 
 ---
 
-## Classical baseline (HOG + SVM)
+## Classical baseline (HOG + LBP + SVM)
 
-A small, fully classical alternative to the YOLO detector, included to
-demonstrate the course's classical computer-vision + machine-learning
-techniques: **Histogram of Oriented Gradients (HOG)** edge/gradient descriptors
-+ **CLAHE** contrast normalization + a **Support Vector Machine** classifier.
-It does the **classification** task only (HOG+SVM does not localize), reuses the
+A fully classical alternative to the YOLO detector, demonstrating the course's
+classical CV + ML techniques on the classification task. No deep-learning
+framework needed (just OpenCV + scikit-learn; LBP is implemented with numpy):
+
+```
+Preprocessing : grayscale -> CLAHE contrast (Topic 5) -> unsharp sharpen / HPF (Topic 3)
+Features      : HOG (gradient/edge) + LBP (texture) + intensity histogram
+Model         : StandardScaler -> [optional PCA] -> SVM (RBF, class_weight='balanced')
+```
+
+It does the **classification** task only (it does not localize), reuses the
 same dataset split, and is scored with the same metrics — so its numbers are
-directly comparable to the detector's classification score. No deep-learning
-framework needed (just OpenCV + scikit-learn).
-
-Run after the data-prep steps have produced `data/dataset/`:
+directly comparable to the detector's classification score. Run after the
+data-prep steps have produced `data/dataset/`:
 
 ```bash
-python baseline/hog_svm.py train     # fit on the train split -> baseline/hog_svm.joblib
-python baseline/hog_svm.py eval      # score on the test split (acc, macro F1)
+python baseline/hog_svm.py train     # fit defaults -> baseline/hog_svm.joblib
+python baseline/hog_svm.py eval      # score on the test split
+python baseline/hog_svm.py tune      # grid-search HOG + SVM (C, gamma) + decision threshold
 python baseline/hog_svm.py predict --images hidden_test   # -> CSV submission
 ```
 
-Reference result on this dataset's test split (yours will vary with the data):
-`Accuracy ≈ 0.80, Macro F1 ≈ 0.83, Classification Score ≈ 0.81`. Use it as a
-sanity floor — the fine-tuned YOLO26 pipeline should beat it, and it also gives
-you a classical fallback that needs no GPU.
+`tune` grid-searches the HOG cell size and SVM `C`/`gamma` (cross-validated on
+the train split), then sweeps the **safe-vs-threat decision threshold** on the
+val split, refits the best combo, and reports on the test split. Flags:
+`--pca` (add PCA 0.95 var), `--quick` (smaller/faster grid),
+`--no-sharpen / --no-lbp / --no-hist` (ablations), `--include-aug`.
+
+Reference progression on this dataset's test split (yours will vary):
+
+| Configuration | Accuracy | Macro F1 | Cls Score |
+|---|---|---|---|
+| HOG only | 0.80 | 0.83 | 0.81 |
+| + CLAHE/sharpen, HOG+LBP+hist (`train`) | 0.81 | 0.86 | 0.83 |
+| + grid-search & tuned threshold (`tune`) | **0.86** | **0.90** | **0.87** |
+
+Use it as a sanity floor and a no-GPU classical fallback; the fine-tuned YOLO26
+pipeline should beat it on classification while also providing localization.
 
 ---
 

@@ -1394,7 +1394,7 @@ Or just run everything: `bash run_all.sh`
 
 ---
 
-## Classical Baseline — HOG + SVM
+## Classical Baseline — HOG + LBP + SVM
 
 Alongside the YOLO26 detector, the project ships a **fully classical
 classification baseline** (`baseline/hog_svm.py`) to demonstrate the course's
@@ -1403,24 +1403,31 @@ classical CV + ML techniques directly on the task:
 ```
 Grayscale image
    → CLAHE contrast normalization        (Topic 5)
-   → Histogram of Oriented Gradients     (HOG edge/gradient descriptor)
-   → Support Vector Machine (RBF kernel)  → {safe | gun | knife | shuriken}
+   → Unsharp sharpen / HPF               (Topic 3)
+   → Features: HOG (gradient/edge) + LBP (texture) + intensity histogram
+   → StandardScaler → [optional PCA]
+   → SVM (RBF, class_weight='balanced')  → {safe | gun | knife | shuriken}
 ```
 
-It is **classification-only** (HOG+SVM does not localize), reuses the same
+It is **classification-only** (it does not localize), reuses the same
 `data/dataset/` split, and is scored with the same `utils/metrics.py`, so its
 Accuracy / Macro-F1 / Classification Score sit on the same scale as the
 detector's. It needs no GPU or deep-learning framework — only OpenCV +
-scikit-learn.
+scikit-learn (LBP is implemented with numpy).
 
 ```
-python baseline/hog_svm.py train     # fit on train split -> baseline/hog_svm.joblib
+python baseline/hog_svm.py train     # fit defaults -> baseline/hog_svm.joblib
 python baseline/hog_svm.py eval      # score on the test split
+python baseline/hog_svm.py tune      # grid-search HOG + SVM (C, gamma) + threshold
 python baseline/hog_svm.py predict --images hidden_test    # -> submission CSV
 ```
 
-Use it as a sanity floor and a no-GPU fallback; the fine-tuned YOLO26 pipeline
-should outperform it on classification while also providing localization.
+`tune` cross-validates the HOG cell size and SVM `C`/`gamma` on the train split,
+then sweeps the safe-vs-threat **decision threshold** on the val split before
+the final test report. On this dataset the progression was roughly:
+HOG-only `Acc 0.80 / F1 0.83` → +LBP/hist/sharpen `0.81 / 0.86` → tuned
+`0.86 / 0.90`. Use it as a sanity floor and no-GPU fallback; the fine-tuned
+YOLO26 pipeline should outperform it on classification while also localizing.
 
 ---
 

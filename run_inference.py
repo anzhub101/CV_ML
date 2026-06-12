@@ -52,7 +52,10 @@ from preprocessing.config import (
 )
 from preprocessing.preprocess     import preprocess
 from inference.quality_handler    import QualityHandler
-from inference.postprocess        import resolve_detections, validate_metal_density, validate_size
+from inference.postprocess        import (
+    resolve_detections, filter_detections, count_by_class,
+    validate_metal_density, validate_size,
+)
 from inference.localization       import LocalizationModule
 from inference.submission         import SubmissionWriter
 from inference.visualize_results  import Visualizer
@@ -137,6 +140,7 @@ def process_image(
     quality_handler: QualityHandler,
     localizer:   LocalizationModule,
     use_tta:     bool = True,
+    refine:      bool = True,
 ) -> dict:
     """
     Run the full pipeline on one image.
@@ -159,25 +163,47 @@ def process_image(
     # Step 2: Classical CV preprocessing (Topics 3–6)
     processed = preprocess(image_array=fixed)
 
-    # Step 3: Detect
+    # Step 3: Detect — base pass keeps EVERY object (multi-object output)
+    base_dets = _yolo_detect(model, processed)
+    kept = filter_detections(base_dets, raw)
+
+    # Step 4: Morphological bbox refinement (Topic 6) on each kept object
+    if refine:
+        for d in kept:
+            d["bbox_xyxy"] = localizer.refine(raw, d["bbox_xyxy"])
+
+    detections = [
+        {"class_name": d["class_name"],
+         "confidence": d["confidence"],
+         "bbox_xyxy":  d["bbox_xyxy"]}
+        for d in kept
+    ]
+    counts = count_by_class(kept)               # {class_name: n}
+
+    # Image-level label/bbox for the classification submission.
+    # TTA (if enabled) provides a more robust single-label vote.
     if use_tta:
         label, bbox, conf = _predict_tta(model, processed, raw)
+        if bbox is not None and refine:
+            bbox = localizer.refine(raw, bbox)
+    elif kept:
+        best = max(kept, key=lambda d: (THREAT_PRIORITY[d["class_name"]],
+                                        d["confidence"]))
+        label, bbox = best["class_name"], best["bbox_xyxy"]
+        conf = best["confidence"]
     else:
-        dets  = _yolo_detect(model, processed)
-        label, bbox = resolve_detections(dets, raw)
-        conf  = max((d["confidence"] for d in dets), default=0.0)
+        label, bbox, conf = "safe", None, 0.0
 
-    # Step 4: Morphological bbox refinement (Topic 6)
-    if bbox is not None:
-        bbox = localizer.refine(raw, bbox)
-
-    log.debug(f"{image_name}: {label} (conf={conf:.3f})  bbox={bbox}  {qr}")
+    log.debug(f"{image_name}: {label} (conf={conf:.3f})  "
+              f"objects={sum(counts.values())} {counts}  {qr}")
 
     return {
         "image_name":     image_name,
         "pred_label":     label,
         "pred_bbox":      bbox,
         "confidence":     conf,
+        "detections":     detections,   # every object: class + conf + box
+        "counts":         counts,       # per-class object counts
         "quality_report": qr,
     }
 
@@ -294,6 +320,82 @@ def _evaluate_full(predictions: list, image_dir: str, label_dir: str):
     print(report.summary())
     save_report(report)
 
+    # ---- object-count accuracy (multi-object) -------------------------------
+    # GT boxes per image give the true object count; compare to the number of
+    # objects we detected. Only over images that contain at least one threat.
+    exact, abs_err, n = 0, 0, 0
+    for p in predictions:
+        g = gt.get(p["image_name"])
+        if g is None or not g["boxes"]:
+            continue
+        gt_n   = len(g["boxes"])
+        pred_n = len(p.get("detections", []))
+        exact += (pred_n == gt_n)
+        abs_err += abs(pred_n - gt_n)
+        n += 1
+    if n:
+        print("\n" + "=" * 55)
+        print("  OBJECT-COUNT ACCURACY (threat images)")
+        print("=" * 55)
+        print(f"  Images with threats     : {n}")
+        print(f"  Exact-count match rate  : {exact / n:.4f}")
+        print(f"  Mean abs count error    : {abs_err / n:.3f}")
+        print("=" * 55)
+
+
+# ── Detailed multi-object CSV ────────────────────────────────────────────────
+
+THREAT_CLASSES = ["gun", "knife", "shuriken"]
+
+
+def write_detailed_csv(predictions: list, path: str):
+    """
+    Per-image multi-object report: the collapsed label, total object count,
+    a per-class count, and every box. One row per image.
+    """
+    import csv
+    import json
+    os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".",
+                exist_ok=True)
+    fields = (["Image Name", "Predicted Label", "Total Objects"]
+              + THREAT_CLASSES + ["Detections (class,conf,x1,y1,x2,y2)"])
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(fields)
+        for p in predictions:
+            counts = p.get("counts", {})
+            dets = [
+                [d["class_name"], round(d["confidence"], 3)]
+                + [round(v) for v in d["bbox_xyxy"]]
+                for d in p.get("detections", [])
+            ]
+            w.writerow(
+                [p["image_name"], p["pred_label"], sum(counts.values())]
+                + [counts.get(c, 0) for c in THREAT_CLASSES]
+                + [json.dumps(dets)]
+            )
+    log.info(f"Detailed per-object CSV -> {path}  ({len(predictions)} rows)")
+
+
+def print_object_summary(predictions: list):
+    """Totals across the whole run: objects per class + multi-object images."""
+    totals = {c: 0 for c in THREAT_CLASSES}
+    multi  = 0
+    for p in predictions:
+        counts = p.get("counts", {})
+        for c in THREAT_CLASSES:
+            totals[c] += counts.get(c, 0)
+        if sum(counts.values()) > 1:
+            multi += 1
+    print("\n" + "=" * 40)
+    print("  OBJECT-LEVEL SUMMARY (all detections)")
+    print("=" * 40)
+    print(f"  Total objects detected : {sum(totals.values())}")
+    for c in THREAT_CLASSES:
+        print(f"  {c:<12}: {totals[c]}")
+    print(f"  Images with >1 object  : {multi}")
+    print("=" * 40)
+
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
@@ -326,6 +428,10 @@ def main():
     parser.add_argument(
         "--no-tta", action="store_true",
         help="Disable Test-Time Augmentation (faster, slightly less robust)"
+    )
+    parser.add_argument(
+        "--no-refine", action="store_true",
+        help="Skip morphological bbox refinement (use raw YOLO boxes)"
     )
     parser.add_argument(
         "--no-viz", action="store_true",
@@ -361,26 +467,31 @@ def main():
     for i, fname in enumerate(image_files, 1):
         img_path = os.path.join(args.images, fname)
         result   = process_image(img_path, model, quality_handler,
-                                 localizer, use_tta)
+                                 localizer, use_tta, refine=not args.no_refine)
         predictions.append(result)
 
+        n_obj  = sum(result.get("counts", {}).values())
         status = f"[{i:>4}/{len(image_files)}]  {fname:<35}  {result['pred_label']}"
         if result["pred_label"] != "safe":
-            status += f"  (conf={result['confidence']:.3f})"
+            status += f"  (conf={result['confidence']:.3f}, {n_obj} obj {result.get('counts', {})})"
         log.info(status)
 
     elapsed = time.time() - t0
     log.info(f"\nInference done in {elapsed:.1f}s  "
              f"({elapsed / len(image_files):.2f}s per image)")
 
-    # Write submission CSV
+    # Write submission CSV (image-level label) + detailed multi-object CSV
     submitter.write(predictions, args.out)
     submitter.validate(args.out)
     submitter.print_summary(args.out)
 
-    # Save annotated images
+    detailed_csv = os.path.splitext(args.out)[0] + "_detailed.csv"
+    write_detailed_csv(predictions, detailed_csv)
+    print_object_summary(predictions)
+
+    # Save annotated images (all detected objects + count banner)
     if visualizer:
-        visualizer.draw_batch(predictions, args.images)
+        visualizer.draw_detections_batch(predictions, args.images)
         visualizer.save_grid([p["image_name"] for p in predictions])
 
     # Metrics (development mode)

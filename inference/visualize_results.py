@@ -92,6 +92,58 @@ class Visualizer:
         cv2.imwrite(out_path, img)
         return img
 
+    # ── Multi-object drawing ─────────────────────────────────────────────────
+
+    def draw_detections(
+        self,
+        image:       np.ndarray,
+        image_name:  str,
+        detections:  List[dict],
+    ) -> np.ndarray:
+        """
+        Draw EVERY detected object with its own class-colored box + confidence,
+        and a per-class count banner across the top. `detections` is a list of
+        {class_name, confidence, bbox_xyxy}. Saves to output_dir.
+        """
+        img = image.copy()
+        if not detections:
+            self._stamp_safe(img)
+        else:
+            counts = {}
+            for det in detections:
+                cls   = det["class_name"]
+                color = CLASS_COLORS.get(cls, (200, 200, 200))
+                x1, y1, x2, y2 = [int(v) for v in det["bbox_xyxy"]]
+                cv2.rectangle(img, (x1, y1), (x2, y2), color, THICKNESS)
+                tag = f"{cls} {det['confidence']:.2f}"
+                (tw, th), _ = cv2.getTextSize(tag, FONT, FONT_SCALE, THICKNESS)
+                ty = max(y1 - 6, th + 4)
+                cv2.rectangle(img, (x1, ty - th - 4), (x1 + tw + 4, ty),
+                              color, -1)
+                cv2.putText(img, tag, (x1 + 2, ty - 2),
+                            FONT, FONT_SCALE, (255, 255, 255), THICKNESS)
+                counts[cls] = counts.get(cls, 0) + 1
+
+            summary = "  ".join(f"{c}:{n}" for c, n in sorted(counts.items()))
+            banner  = f"{sum(counts.values())} object(s)   {summary}"
+            (bw, bh), _ = cv2.getTextSize(banner, FONT, FONT_SCALE, THICKNESS)
+            cv2.rectangle(img, (0, 0), (bw + 10, bh + 12), (0, 0, 0), -1)
+            cv2.putText(img, banner, (5, bh + 4),
+                        FONT, FONT_SCALE, (255, 255, 255), THICKNESS)
+
+        cv2.imwrite(os.path.join(self.output_dir, image_name), img)
+        return img
+
+    def draw_detections_batch(self, predictions: List[dict], image_dir: str):
+        """Draw all detected objects for each result dict (multi-object mode)."""
+        log.info(f"Visualizing {len(predictions)} multi-object results "
+                 f"-> {self.output_dir}")
+        for p in predictions:
+            img = cv2.imread(os.path.join(image_dir, p["image_name"]))
+            if img is None:
+                continue
+            self.draw_detections(img, p["image_name"], p.get("detections", []))
+
     def _stamp_safe(self, img: np.ndarray):
         h, w = img.shape[:2]
         text = "SAFE"
