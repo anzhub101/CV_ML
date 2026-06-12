@@ -25,11 +25,10 @@ weights/*.pt
 # YOLO training runs
 training/runs/
 
-# Outputs
-outputs/*.csv
-outputs/*.png
-outputs/*.txt
-outputs/*.log
+# Outputs (keep the folder via .gitkeep, ignore all generated content
+# including subfolders like outputs/annotated/ and outputs/gui_annotated/)
+outputs/*
+!outputs/.gitkeep
 
 # OS / IDE
 .DS_Store

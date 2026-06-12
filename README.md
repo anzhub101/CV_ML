@@ -67,6 +67,8 @@ Project_CEN454/
 │   └── logger.py
 ├── baseline/
 │   └── hog_svm.py              # classical HOG+LBP+SVM classifier (+ tuning)
+├── gui/
+│   └── app.py                  # Gradio GUI — upload images/folder, view results
 ├── run_inference.py            # MASTER inference + evaluation entrypoint
 ├── data/                       # all auto-staged/generated (not committed)
 │   ├── raw/{GUN,knife,shuriken,safe}/      # staged from TrainData/
@@ -187,9 +189,8 @@ python training/validate.py           # YOLO mAP50, mAP50-95, precision/recall
 **3. Run the full framework and compute the testing criteria**
 
 This is the end-to-end inference pipeline (quality-fix → classical CV →
-YOLO26 → post-processing → localization refinement → TTA). Point it at the
-test images **and** their YOLO ground-truth labels to score the exact project
-criteria:
+YOLO26 → post-processing → TTA). Point it at the test images **and** their
+YOLO ground-truth labels to score the exact project criteria:
 
 ```bash
 python run_inference.py \
@@ -205,13 +206,66 @@ Mean IoU (>=0.5)     -> Localization Score   = mean IoU            (30%)
                         FINAL SCORE          = 0.7*Cls + 0.3*Loc
 ```
 
+It also writes **`outputs/predictions_detailed.csv`** (per image: label, total
+object count, per-class counts, and every box) and annotated images in
+`outputs/annotated/` — see *Multi-object detection & counting* below.
+
+Tunable flags (defaults are the best config found on this data):
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--no-tta` | TTA on | disable Test-Time Augmentation (faster, ~−2% acc) |
+| `--refine` | **off** | enable morphological box refinement (it *lowers* IoU here) |
+| `--conf-low X` | 0.25 | min detection confidence — lower catches more (fewer missed threats) |
+| `--metal-density X` | 50 | metal-density gate for medium-confidence boxes — lower = more permissive |
+| `--no-viz` | viz on | skip saving annotated images |
+
 ### Evaluation day — predict on the hidden test set (no labels)
 
 ```bash
 python run_inference.py --images hidden_test
-# -> writes outputs/predictions.csv  (Image Name, Predicted Label)
-# add --no-tta for speed, --no-viz to skip annotated images
+# -> writes outputs/predictions.csv (Image Name, Predicted Label)
+#  + outputs/predictions_detailed.csv (per-object boxes + counts)
 ```
+
+---
+
+## Multi-object detection & counting
+
+A single bag can contain several threats (e.g. two guns, or a gun **and** a
+knife). The detector finds **every** object — not just one per image:
+
+- `outputs/predictions.csv` — image-level label (one row per image, for the
+  classification score / submission).
+- `outputs/predictions_detailed.csv` — one row per image with the label, the
+  **total object count**, **per-class counts** (`gun,knife,shuriken`), and
+  every box `[class, conf, x1,y1,x2,y2]`.
+- `outputs/annotated/` — each image with all object boxes (class-colored,
+  with confidence) and a count banner across the top.
+
+With `--labels`, the run also reports **object-count accuracy** (exact-count
+match rate + mean absolute count error) against the ground-truth boxes.
+
+---
+
+## GUI
+
+A simple Gradio app to run inference on new images interactively — upload one
+or more images, **or** point at a folder, and see the results.
+
+```bash
+pip install gradio          # one-time
+python gui/app.py           # opens http://127.0.0.1:7860
+```
+
+Pick a **detector**:
+- **YOLO26** — boxes and counts every object per class (uses the same pipeline
+  as `run_inference.py`); TTA / refinement / confidence controls apply here.
+- **Classical HOG+SVM** — the baseline; one image-level label per image, no
+  boxes or counts (needs `python baseline/hog_svm.py train` first).
+
+Outputs a gallery of annotated images, a per-image results table, and a run
+summary, so you can compare the two detectors side by side on the same images.
 
 ---
 
@@ -255,6 +309,27 @@ Reference progression on this dataset's test split (yours will vary):
 
 Use it as a sanity floor and a no-GPU classical fallback; the fine-tuned YOLO26
 pipeline should beat it on classification while also providing localization.
+
+---
+
+## Results (this dataset's 194-image test split)
+
+| System | Accuracy | Macro F1 | Cls Score | Mean IoU | **Final** |
+|---|---|---|---|---|---|
+| Classical HOG+LBP+SVM (tuned) | 0.861 | 0.902 | 0.873 | — *(no localization)* | ~0.611 |
+| YOLO26 — original (refine on, conf 0.35) | 0.923 | 0.914 | 0.920 | 0.408 | 0.767 |
+| **YOLO26 — tuned defaults** (refine off, conf 0.25, metal 50) | **0.938** | **0.932** | **0.936** | **0.452** | **0.791** |
+
+How the YOLO defaults got there (each lever is independent and additive):
+
+- **refinement off** → localization IoU 0.41 → 0.45 (the morphological refine
+  step was loosening the boxes). No effect on classification.
+- **conf_low 0.35 → 0.25 + metal-density 100 → 50** → catches more real threats:
+  `safe` precision 0.64 → 0.72 (≈ missed threats halved), accuracy 0.92 → 0.94.
+- **TTA on** carries classification robustness.
+
+Localization (~0.45 mean IoU) remains the main ceiling and the best target for
+further work.
 
 ---
 

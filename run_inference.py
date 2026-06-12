@@ -48,7 +48,7 @@ sys.path.insert(0, ROOT)
 
 from preprocessing.config import (
     CLASS_NAMES, CLASS_MAP, CONF_LOW, CONF_HIGH,
-    THREAT_PRIORITY, MIN_BBOX_AREA_RATIO,
+    THREAT_PRIORITY, MIN_BBOX_AREA_RATIO, METAL_DENSITY_THRESHOLD,
 )
 from preprocessing.preprocess     import preprocess
 from inference.quality_handler    import QualityHandler
@@ -86,9 +86,9 @@ def load_model(weights: str = WEIGHTS) -> YOLO:
 
 # ── Single-pass YOLO detection ───────────────────────────────────────────────
 
-def _yolo_detect(model: YOLO, image: cv2.Mat) -> list:
+def _yolo_detect(model: YOLO, image: cv2.Mat, conf: float = CONF_LOW) -> list:
     """Run YOLO on a preprocessed image; return raw detection dicts."""
-    results = model(image, conf=CONF_LOW, verbose=False)
+    results = model(image, conf=conf, verbose=False)
     boxes   = results[0].boxes
     detections = []
     if boxes is not None and len(boxes) > 0:
@@ -107,7 +107,9 @@ def _yolo_detect(model: YOLO, image: cv2.Mat) -> list:
 
 # ── Test-Time Augmentation ───────────────────────────────────────────────────
 
-def _predict_tta(model: YOLO, processed: cv2.Mat, original: cv2.Mat) -> tuple:
+def _predict_tta(model: YOLO, processed: cv2.Mat, original: cv2.Mat,
+                 conf_low: float = CONF_LOW,
+                 metal_threshold: float = METAL_DENSITY_THRESHOLD) -> tuple:
     """5-variant TTA with majority vote on label."""
     variants = [
         processed,
@@ -118,8 +120,9 @@ def _predict_tta(model: YOLO, processed: cv2.Mat, original: cv2.Mat) -> tuple:
     ]
     labels, bboxes, confs = [], [], []
     for v in variants:
-        dets = _yolo_detect(model, v)
-        lbl, bb = resolve_detections(dets, original)
+        dets = _yolo_detect(model, v, conf=conf_low)
+        lbl, bb = resolve_detections(dets, original, conf_low=conf_low,
+                                     metal_threshold=metal_threshold)
         labels.append(lbl)
         if bb is not None:
             bboxes.append(bb)
@@ -140,7 +143,9 @@ def process_image(
     quality_handler: QualityHandler,
     localizer:   LocalizationModule,
     use_tta:     bool = True,
-    refine:      bool = True,
+    refine:      bool = False,
+    conf_low:    float = CONF_LOW,
+    metal_threshold: float = METAL_DENSITY_THRESHOLD,
 ) -> dict:
     """
     Run the full pipeline on one image.
@@ -164,8 +169,9 @@ def process_image(
     processed = preprocess(image_array=fixed)
 
     # Step 3: Detect — base pass keeps EVERY object (multi-object output)
-    base_dets = _yolo_detect(model, processed)
-    kept = filter_detections(base_dets, raw)
+    base_dets = _yolo_detect(model, processed, conf=conf_low)
+    kept = filter_detections(base_dets, raw, conf_low=conf_low,
+                             metal_threshold=metal_threshold)
 
     # Step 4: Morphological bbox refinement (Topic 6) on each kept object
     if refine:
@@ -183,7 +189,8 @@ def process_image(
     # Image-level label/bbox for the classification submission.
     # TTA (if enabled) provides a more robust single-label vote.
     if use_tta:
-        label, bbox, conf = _predict_tta(model, processed, raw)
+        label, bbox, conf = _predict_tta(model, processed, raw,
+                                         conf_low, metal_threshold)
         if bbox is not None and refine:
             bbox = localizer.refine(raw, bbox)
     elif kept:
@@ -430,8 +437,19 @@ def main():
         help="Disable Test-Time Augmentation (faster, slightly less robust)"
     )
     parser.add_argument(
-        "--no-refine", action="store_true",
-        help="Skip morphological bbox refinement (use raw YOLO boxes)"
+        "--refine", action="store_true",
+        help="Enable morphological bbox refinement (OFF by default — on this "
+             "data it lowered IoU; raw YOLO boxes score higher)"
+    )
+    parser.add_argument(
+        "--conf-low", type=float, default=CONF_LOW,
+        help=f"Min detection confidence (default {CONF_LOW}). Lower => catch "
+             f"more (fewer missed threats) at the cost of more false positives."
+    )
+    parser.add_argument(
+        "--metal-density", type=float, default=METAL_DENSITY_THRESHOLD,
+        help=f"Metal-density threshold for medium-confidence boxes "
+             f"(default {METAL_DENSITY_THRESHOLD}; lower => more permissive)."
     )
     parser.add_argument(
         "--no-viz", action="store_true",
@@ -452,7 +470,9 @@ def main():
         sys.exit(1)
 
     use_tta = not args.no_tta
-    log.info(f"Images: {len(image_files)}  |  TTA: {'ON' if use_tta else 'OFF'}")
+    log.info(f"Images: {len(image_files)}  |  TTA: {'ON' if use_tta else 'OFF'}"
+             f"  |  refine: {'ON' if args.refine else 'OFF'}"
+             f"  |  conf_low: {args.conf_low}  |  metal: {args.metal_density}")
 
     # Initialise components
     model           = load_model(args.weights)
@@ -467,7 +487,9 @@ def main():
     for i, fname in enumerate(image_files, 1):
         img_path = os.path.join(args.images, fname)
         result   = process_image(img_path, model, quality_handler,
-                                 localizer, use_tta, refine=not args.no_refine)
+                                 localizer, use_tta, refine=args.refine,
+                                 conf_low=args.conf_low,
+                                 metal_threshold=args.metal_density)
         predictions.append(result)
 
         n_obj  = sum(result.get("counts", {}).values())

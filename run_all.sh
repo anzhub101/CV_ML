@@ -57,6 +57,9 @@ echo "=================================================="
 echo " STEP 7/7  Full framework eval on test split"
 echo "          (classification + localization criteria)"
 echo "=================================================="
+# Tuned defaults (config.py / run_inference.py): TTA on, refinement OFF,
+# conf_low=0.25, metal_density=50. Also writes predictions_detailed.csv
+# (per-object boxes + counts) and annotated images.
 python run_inference.py \
     --images data/dataset/images/test \
     --labels data/dataset/labels/test

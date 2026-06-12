@@ -25,7 +25,7 @@ from preprocessing.config import (
 )
 
 
-def validate_metal_density(image, bbox_xyxy):
+def validate_metal_density(image, bbox_xyxy, threshold=METAL_DENSITY_THRESHOLD):
     """Real metallic weapons appear dense (bright) in the blue X-ray channel."""
     x1, y1, x2, y2 = [int(v) for v in bbox_xyxy]
     x1, y1 = max(0, x1), max(0, y1)
@@ -35,7 +35,7 @@ def validate_metal_density(image, bbox_xyxy):
         return False
     roi = image[y1:y2, x1:x2]
     blue = roi[:, :, 0]
-    return float(np.mean(blue)) >= METAL_DENSITY_THRESHOLD
+    return float(np.mean(blue)) >= threshold
 
 
 def validate_size(bbox_xyxy, image_shape):
@@ -48,12 +48,15 @@ def validate_size(bbox_xyxy, image_shape):
     return (box_area / img_area) >= MIN_BBOX_AREA_RATIO
 
 
-def filter_detections(detections, image):
+def filter_detections(detections, image, conf_low=CONF_LOW,
+                      conf_high=CONF_HIGH, metal_threshold=METAL_DENSITY_THRESHOLD):
     """
     Apply the three robustness filters and return ALL detections that survive.
 
     detections: list of dicts with keys
         class_id, class_name, confidence, bbox_xyxy
+    conf_low / conf_high / metal_threshold default to the config values but can
+    be overridden (e.g. to trade recall vs. precision on missed threats).
     Returns: list of the kept detection dicts (may be empty = safe).
     """
     valid = []
@@ -61,12 +64,13 @@ def filter_detections(detections, image):
         conf = det['confidence']
         bbox = det['bbox_xyxy']
 
-        if conf < CONF_LOW:
+        if conf < conf_low:
             continue
         if not validate_size(bbox, image.shape):
             continue
         # medium-confidence detections get the extra density check
-        if conf < CONF_HIGH and not validate_metal_density(image, bbox):
+        if conf < conf_high and not validate_metal_density(image, bbox,
+                                                            metal_threshold):
             continue
         valid.append(det)
     return valid
@@ -80,7 +84,9 @@ def count_by_class(detections):
     return counts
 
 
-def resolve_detections(detections, image):
+def resolve_detections(detections, image, conf_low=CONF_LOW,
+                       conf_high=CONF_HIGH,
+                       metal_threshold=METAL_DENSITY_THRESHOLD):
     """
     Apply all filters and collapse to a single (label, bbox) for the
     image-level classification submission (highest-priority threat).
@@ -90,7 +96,8 @@ def resolve_detections(detections, image):
     if not detections:
         return 'safe', None
 
-    valid = filter_detections(detections, image)
+    valid = filter_detections(detections, image, conf_low, conf_high,
+                              metal_threshold)
     if not valid:
         return 'safe', None
 
